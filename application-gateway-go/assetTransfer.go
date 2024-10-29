@@ -1,9 +1,3 @@
-/*
-Copyright 2021 IBM All Rights Reserved.
-
-SPDX-License-Identifier: Apache-2.0
-*/
-
 package main
 
 import (
@@ -32,7 +26,7 @@ const (
 	certPath     = cryptoPath + "/users/User1@org1.example.com/msp/signcerts"
 	keyPath      = cryptoPath + "/users/User1@org1.example.com/msp/keystore"
 	tlsCertPath  = cryptoPath + "/peers/peer0.org1.example.com/tls/ca.crt"
-	peerEndpoint = "dns:///localhost:7051"
+	peerEndpoint = "localhost:7051"
 	gatewayPeer  = "peer0.org1.example.com"
 )
 
@@ -40,20 +34,17 @@ var now = time.Now()
 var assetId = fmt.Sprintf("asset%d", now.Unix()*1e3+int64(now.Nanosecond())/1e6)
 
 func main() {
-	// The gRPC client connection should be shared by all Gateway connections to this endpoint
 	clientConnection := newGrpcConnection()
 	defer clientConnection.Close()
 
 	id := newIdentity()
 	sign := newSign()
 
-	// Create a Gateway connection for a specific client identity
 	gw, err := client.Connect(
 		id,
 		client.WithSign(sign),
 		client.WithHash(hash.SHA256),
 		client.WithClientConnection(clientConnection),
-		// Default timeouts for different gRPC calls
 		client.WithEvaluateTimeout(5*time.Second),
 		client.WithEndorseTimeout(15*time.Second),
 		client.WithSubmitTimeout(5*time.Second),
@@ -64,7 +55,6 @@ func main() {
 	}
 	defer gw.Close()
 
-	// Override default values for chaincode and channel name as they may differ in testing contexts.
 	chaincodeName := "basic"
 	if ccname := os.Getenv("CHAINCODE_NAME"); ccname != "" {
 		chaincodeName = ccname
@@ -78,12 +68,7 @@ func main() {
 	network := gw.GetNetwork(channelName)
 	contract := network.GetContract(chaincodeName)
 
-	initLedger(contract)
-	getAllAssets(contract)
 	createAsset(contract)
-	readAssetByID(contract)
-	transferAssetAsync(contract)
-	exampleErrorHandling(contract)
 }
 
 // newGrpcConnection creates a gRPC connection to the Gateway server.
@@ -102,7 +87,7 @@ func newGrpcConnection() *grpc.ClientConn {
 	certPool.AddCert(certificate)
 	transportCredentials := credentials.NewClientTLSFromCert(certPool, gatewayPeer)
 
-	connection, err := grpc.NewClient(peerEndpoint, grpc.WithTransportCredentials(transportCredentials))
+	connection, err := grpc.Dial(peerEndpoint, grpc.WithTransportCredentials(transportCredentials))
 	if err != nil {
 		panic(fmt.Errorf("failed to create gRPC connection: %w", err))
 	}
@@ -164,133 +149,14 @@ func readFirstFile(dirPath string) ([]byte, error) {
 	return os.ReadFile(path.Join(dirPath, fileNames[0]))
 }
 
-// This type of transaction would typically only be run once by an application the first time it was started after its
-// initial deployment. A new version of the chaincode deployed later would likely not need to run an "init" function.
-func initLedger(contract *client.Contract) {
-	fmt.Printf("\n--> Submit Transaction: InitLedger, function creates the initial set of assets on the ledger \n")
-
-	_, err := contract.SubmitTransaction("InitLedger")
-	if err != nil {
-		panic(fmt.Errorf("failed to submit transaction: %w", err))
-	}
-
-	fmt.Printf("*** Transaction committed successfully\n")
-}
-
-// Evaluate a transaction to query ledger state.
-func getAllAssets(contract *client.Contract) {
-	fmt.Println("\n--> Evaluate Transaction: GetAllAssets, function returns all the current assets on the ledger")
-
-	evaluateResult, err := contract.EvaluateTransaction("GetAllAssets")
-	if err != nil {
-		panic(fmt.Errorf("failed to evaluate transaction: %w", err))
-	}
-	result := formatJSON(evaluateResult)
-
-	fmt.Printf("*** Result:%s\n", result)
-}
-
 // Submit a transaction synchronously, blocking until it has been committed to the ledger.
 func createAsset(contract *client.Contract) {
-	fmt.Printf("\n--> Submit Transaction: CreateAsset, creates new asset with ID, Color, Size, Owner and AppraisedValue arguments \n")
+	fmt.Printf("\n--> Submit Transaction: CreateAsset\n")
 
-	_, err := contract.SubmitTransaction("CreateAsset", assetId, "yellow", "5", "Tom", "1300")
+	_, err := contract.SubmitTransaction("CreateAsset", assetId, "1206", "+91 23456789", "4567", "500", "SUCCESS", "800", "OFFLINE", "YES")
 	if err != nil {
 		panic(fmt.Errorf("failed to submit transaction: %w", err))
 	}
 
 	fmt.Printf("*** Transaction committed successfully\n")
-}
-
-// Evaluate a transaction by assetID to query ledger state.
-func readAssetByID(contract *client.Contract) {
-	fmt.Printf("\n--> Evaluate Transaction: ReadAsset, function returns asset attributes\n")
-
-	evaluateResult, err := contract.EvaluateTransaction("ReadAsset", assetId)
-	if err != nil {
-		panic(fmt.Errorf("failed to evaluate transaction: %w", err))
-	}
-	result := formatJSON(evaluateResult)
-
-	fmt.Printf("*** Result:%s\n", result)
-}
-
-// Submit transaction asynchronously, blocking until the transaction has been sent to the orderer, and allowing
-// this thread to process the chaincode response (e.g. update a UI) without waiting for the commit notification
-func transferAssetAsync(contract *client.Contract) {
-	fmt.Printf("\n--> Async Submit Transaction: TransferAsset, updates existing asset owner")
-
-	submitResult, commit, err := contract.SubmitAsync("TransferAsset", client.WithArguments(assetId, "Mark"))
-	if err != nil {
-		panic(fmt.Errorf("failed to submit transaction asynchronously: %w", err))
-	}
-
-	fmt.Printf("\n*** Successfully submitted transaction to transfer ownership from %s to Mark. \n", string(submitResult))
-	fmt.Println("*** Waiting for transaction commit.")
-
-	if commitStatus, err := commit.Status(); err != nil {
-		panic(fmt.Errorf("failed to get commit status: %w", err))
-	} else if !commitStatus.Successful {
-		panic(fmt.Errorf("transaction %s failed to commit with status: %d", commitStatus.TransactionID, int32(commitStatus.Code)))
-	}
-
-	fmt.Printf("*** Transaction committed successfully\n")
-}
-
-// Submit transaction, passing in the wrong number of arguments ,expected to throw an error containing details of any error responses from the smart contract.
-func exampleErrorHandling(contract *client.Contract) {
-	fmt.Println("\n--> Submit Transaction: UpdateAsset asset70, asset70 does not exist and should return an error")
-
-	_, err := contract.SubmitTransaction("UpdateAsset", "asset70", "blue", "5", "Tomoko", "300")
-	if err == nil {
-		panic("******** FAILED to return an error")
-	}
-
-	fmt.Println("*** Successfully caught the error:")
-
-	var endorseErr *client.EndorseError
-	var submitErr *client.SubmitError
-	var commitStatusErr *client.CommitStatusError
-	var commitErr *client.CommitError
-
-	if errors.As(err, &endorseErr) {
-		fmt.Printf("Endorse error for transaction %s with gRPC status %v: %s\n", endorseErr.TransactionID, status.Code(endorseErr), endorseErr)
-	} else if errors.As(err, &submitErr) {
-		fmt.Printf("Submit error for transaction %s with gRPC status %v: %s\n", submitErr.TransactionID, status.Code(submitErr), submitErr)
-	} else if errors.As(err, &commitStatusErr) {
-		if errors.Is(err, context.DeadlineExceeded) {
-			fmt.Printf("Timeout waiting for transaction %s commit status: %s", commitStatusErr.TransactionID, commitStatusErr)
-		} else {
-			fmt.Printf("Error obtaining commit status for transaction %s with gRPC status %v: %s\n", commitStatusErr.TransactionID, status.Code(commitStatusErr), commitStatusErr)
-		}
-	} else if errors.As(err, &commitErr) {
-		fmt.Printf("Transaction %s failed to commit with status %d: %s\n", commitErr.TransactionID, int32(commitErr.Code), err)
-	} else {
-		panic(fmt.Errorf("unexpected error type %T: %w", err, err))
-	}
-
-	// Any error that originates from a peer or orderer node external to the gateway will have its details
-	// embedded within the gRPC status error. The following code shows how to extract that.
-	statusErr := status.Convert(err)
-
-	details := statusErr.Details()
-	if len(details) > 0 {
-		fmt.Println("Error Details:")
-
-		for _, detail := range details {
-			switch detail := detail.(type) {
-			case *gateway.ErrorDetail:
-				fmt.Printf("- address: %s; mspId: %s; message: %s\n", detail.Address, detail.MspId, detail.Message)
-			}
-		}
-	}
-}
-
-// Format JSON data
-func formatJSON(data []byte) string {
-	var prettyJSON bytes.Buffer
-	if err := json.Indent(&prettyJSON, data, "", "  "); err != nil {
-		panic(fmt.Errorf("failed to parse JSON: %w", err))
-	}
-	return prettyJSON.String()
 }
